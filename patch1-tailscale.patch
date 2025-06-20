@@ -1,0 +1,352 @@
+diff --git a/acme/acme.go b/acme/acme.go
+index 6be00d1..c5808e8 100644
+--- a/acme/acme.go
++++ b/acme/acme.go
+@@ -177,13 +177,14 @@ func (c *Client) Discover(ctx context.Context) (Directory, error) {
+ 	c.addNonce(res.Header)
+ 
+ 	var v struct {
+-		Reg       string `json:"newAccount"`
+-		Authz     string `json:"newAuthz"`
+-		Order     string `json:"newOrder"`
+-		Revoke    string `json:"revokeCert"`
+-		Nonce     string `json:"newNonce"`
+-		KeyChange string `json:"keyChange"`
+-		Meta      struct {
++		Reg         string `json:"newAccount"`
++		Authz       string `json:"newAuthz"`
++		Order       string `json:"newOrder"`
++		Revoke      string `json:"revokeCert"`
++		Nonce       string `json:"newNonce"`
++		KeyChange   string `json:"keyChange"`
++		RenewalInfo string `json:"renewalInfo"`
++		Meta        struct {
+ 			Terms        string   `json:"termsOfService"`
+ 			Website      string   `json:"website"`
+ 			CAA          []string `json:"caaIdentities"`
+@@ -203,6 +204,7 @@ func (c *Client) Discover(ctx context.Context) (Directory, error) {
+ 		RevokeURL:               v.Revoke,
+ 		NonceURL:                v.Nonce,
+ 		KeyChangeURL:            v.KeyChange,
++		RenewalInfoURL:          v.RenewalInfo,
+ 		Terms:                   v.Meta.Terms,
+ 		Website:                 v.Meta.Website,
+ 		CAA:                     v.Meta.CAA,
+@@ -255,6 +257,48 @@ func (c *Client) RevokeCert(ctx context.Context, key crypto.Signer, cert []byte,
+ 	return c.revokeCertRFC(ctx, key, cert, reason)
+ }
+ 
++// FetchRenewalInfo retrieves the RenewalInfo from Directory.RenewalInfoURL.
++func (c *Client) FetchRenewalInfo(ctx context.Context, leaf []byte) (*RenewalInfo, error) {
++	if _, err := c.Discover(ctx); err != nil {
++		return nil, err
++	}
++
++	parsedLeaf, err := x509.ParseCertificate(leaf)
++	if err != nil {
++		return nil, fmt.Errorf("parsing leaf certificate: %w", err)
++	}
++
++	renewalURL := c.getRenewalURL(parsedLeaf)
++
++	res, err := c.get(ctx, renewalURL, wantStatus(http.StatusOK))
++	if err != nil {
++		return nil, fmt.Errorf("fetching renewal info: %w", err)
++	}
++	defer res.Body.Close()
++
++	var info RenewalInfo
++	if err := json.NewDecoder(res.Body).Decode(&info); err != nil {
++		return nil, fmt.Errorf("parsing renewal info response: %w", err)
++	}
++	return &info, nil
++}
++
++func (c *Client) getRenewalURL(cert *x509.Certificate) string {
++	// See https://www.ietf.org/archive/id/draft-ietf-acme-ari-04.html#name-the-renewalinfo-resource
++	// for how the request URL is built.
++	url := c.dir.RenewalInfoURL
++	if !strings.HasSuffix(url, "/") {
++		url += "/"
++	}
++	return url + certRenewalIdentifier(cert)
++}
++
++func certRenewalIdentifier(cert *x509.Certificate) string {
++	aki := base64.RawURLEncoding.EncodeToString(cert.AuthorityKeyId)
++	serial := base64.RawURLEncoding.EncodeToString(cert.SerialNumber.Bytes())
++	return aki + "." + serial
++}
++
+ // AcceptTOS always returns true to indicate the acceptance of a CA's Terms of Service
+ // during account registration. See Register method of Client for more details.
+ func AcceptTOS(tosURL string) bool { return true }
+diff --git a/acme/acme_test.go b/acme/acme_test.go
+index a3118f4..fa91ca1 100644
+--- a/acme/acme_test.go
++++ b/acme/acme_test.go
+@@ -14,13 +14,16 @@ import (
+ 	"encoding/base64"
+ 	"encoding/hex"
+ 	"encoding/json"
++	"encoding/pem"
+ 	"errors"
+ 	"fmt"
+ 	"io"
+ 	"math/big"
+ 	"net/http"
+ 	"net/http/httptest"
++	"net/url"
+ 	"reflect"
++	"strings"
+ 	"testing"
+ 	"time"
+ )
+@@ -35,6 +38,17 @@ func newTestClient() *Client {
+ 	}
+ }
+ 
++// newTestClientWithMockDirectory creates a client with a non-nil Directory
++// that contains mock field values.
++func newTestClientWithMockDirectory() *Client {
++	return &Client{
++		Key: testKeyEC,
++		dir: &Directory{
++			RenewalInfoURL: "https://example.com/acme/renewal-info/",
++		},
++	}
++}
++
+ // Decodes a JWS-encoded request and unmarshals the decoded JSON into a provided
+ // interface.
+ func decodeJWSRequest(t *testing.T, v interface{}, r io.Reader) {
+@@ -546,6 +560,108 @@ func TestFetchCertSize(t *testing.T) {
+ 	}
+ }
+ 
++const (
++	leafPEM = `-----BEGIN CERTIFICATE-----
++MIIEizCCAvOgAwIBAgIRAITApw7R8HSs7GU7cj8dEyUwDQYJKoZIhvcNAQELBQAw
++gYUxHjAcBgNVBAoTFW1rY2VydCBkZXZlbG9wbWVudCBDQTEtMCsGA1UECwwkY3Bh
++bG1lckBwdW1wa2luLmxvY2FsIChDaHJpcyBQYWxtZXIpMTQwMgYDVQQDDCtta2Nl
++cnQgY3BhbG1lckBwdW1wa2luLmxvY2FsIChDaHJpcyBQYWxtZXIpMB4XDTIzMDcx
++MjE4MjIxNloXDTI1MTAxMjE4MjIxNlowWDEnMCUGA1UEChMebWtjZXJ0IGRldmVs
++b3BtZW50IGNlcnRpZmljYXRlMS0wKwYDVQQLDCRjcGFsbWVyQHB1bXBraW4ubG9j
++YWwgKENocmlzIFBhbG1lcikwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIB
++AQDNDO8P4MI9jaqVcPtF8C4GgHnTP5EK3U9fgyGApKGxTpicMQkA6z4GXwUP/Fvq
++7RuCU9Wg7By5VetKIHF7FxkxWkUMrssr7mV8v6mRCh/a5GqDs14aj5ucjLQAJV74
++tLAdrCiijQ1fkPWc82fob+LkfKWGCWw7Cxf6ZtEyC8jz/DnfQXUvOiZS729ndGF7
++FobKRfIoirD+GI2NTYIp3LAUFSPR6HXTe7HAg8J81VoUKli8z504+FebfMmHePm/
++zIfiI0njAj4czOlZD56/oLsV0WRUizFjafHHUFz1HVdfFw8Qf9IOOTydYOe8M5i0
++lVbVO5G+HP+JDn3cr9MT41B9AgMBAAGjgaEwgZ4wDgYDVR0PAQH/BAQDAgWgMBMG
++A1UdJQQMMAoGCCsGAQUFBwMBMB8GA1UdIwQYMBaAFPpL4Q0O7Z7voTkjn2rrFCsf
++s8TbMFYGA1UdEQRPME2CC2V4YW1wbGUuY29tgg0qLmV4YW1wbGUuY29tggxleGFt
++cGxlLnRlc3SCCWxvY2FsaG9zdIcEfwAAAYcQAAAAAAAAAAAAAAAAAAAAATANBgkq
++hkiG9w0BAQsFAAOCAYEAMlOb7lrHuSxwcnAu7mL1ysTGqKn1d2TyDJAN5W8YFY+4
++XLpofNkK2UzZ0t9LQRnuFUcjmfqmfplh5lpC7pKmtL4G5Qcdc+BczQWcopbxd728
++sht9BKRkH+Bo1I+1WayKKNXW+5bsMv4CH641zxaMBlzjEnPvwKkNaGLMH3x5lIeX
++GGgkKNXwVtINmyV+lTNVtu2IlHprxJGCjRfEuX7mEv6uRnqz3Wif+vgyh3MBgM/1
++dUOsTBNH4a6Jl/9VPSOfRdQOStqIlwTa/J1bhTvivsYt1+eWjLnsQJLgZQqwKvYH
++BJ30gAk1oNnuSkx9dHbx4mO+4mB9oIYUALXUYakb8JHTOnuMSj9qelVj5vjVxl9q
++KRitptU+kLYRA4HSgUXrhDIm4Q6D/w8/ascPqQ3HxPIDFLe+gTofEjqnnsnQB29L
++gWpI8l5/MtXAOMdW69eEovnADc2pgaiif0T+v9nNKBc5xfDZHnrnqIqVzQEwL5Qv
++niQI8IsWD5LcQ1Eg7kCq
++-----END CERTIFICATE-----`
++)
++
++func TestGetRenewalURL(t *testing.T) {
++	leaf, _ := pem.Decode([]byte(leafPEM))
++
++	parsedLeaf, err := x509.ParseCertificate(leaf.Bytes)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	client := newTestClientWithMockDirectory()
++	urlString := client.getRenewalURL(parsedLeaf)
++
++	parsedURL, err := url.Parse(urlString)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if scheme := parsedURL.Scheme; scheme == "" {
++		t.Fatalf("malformed URL scheme: %q from %q", scheme, urlString)
++	}
++	if host := parsedURL.Host; host == "" {
++		t.Fatalf("malformed URL host: %q from %q", host, urlString)
++	}
++	if parsedURL.RawQuery != "" {
++		t.Fatalf("malformed URL: should not have a query")
++	}
++	path := parsedURL.EscapedPath()
++	slash := strings.LastIndex(path, "/")
++	if slash == -1 {
++		t.Fatalf("malformed URL path: %q from %q", path, urlString)
++	}
++	certID := path[slash+1:]
++	if certID == "" {
++		t.Fatalf("missing certificate identifier in URL path: %q from %q", path, urlString)
++	}
++	certIDParts := strings.Split(certID, ".")
++	if len(certIDParts) != 2 {
++		t.Fatalf("certificate identifier should consist of 2 base64-encoded values separated by a dot: %q from %q", certID, urlString)
++	}
++	if _, err := base64.RawURLEncoding.DecodeString(certIDParts[0]); err != nil {
++		t.Fatalf("malformed AKI part in certificate identifier: %q from %q: %v", certIDParts[0], urlString, err)
++	}
++	if _, err := base64.RawURLEncoding.DecodeString(certIDParts[1]); err != nil {
++		t.Fatalf("malformed Serial part in certificate identifier: %q from %q: %v", certIDParts[1], urlString, err)
++	}
++
++}
++
++func TestUnmarshalRenewalInfo(t *testing.T) {
++	renewalInfoJSON := `{
++     "suggestedWindow": {
++       "start": "2021-01-03T00:00:00Z",
++       "end": "2021-01-07T00:00:00Z"
++     },
++     "explanationURL": "https://example.com/docs/example-mass-reissuance-event"
++   }`
++	expectedStart := time.Date(2021, time.January, 3, 0, 0, 0, 0, time.UTC)
++	expectedEnd := time.Date(2021, time.January, 7, 0, 0, 0, 0, time.UTC)
++
++	var info RenewalInfo
++	if err := json.Unmarshal([]byte(renewalInfoJSON), &info); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := url.Parse(info.ExplanationURL); err != nil {
++		t.Fatal(err)
++	}
++	if !info.SuggestedWindow.Start.Equal(expectedStart) {
++		t.Fatalf("%v != %v", expectedStart, info.SuggestedWindow.Start)
++	}
++	if !info.SuggestedWindow.End.Equal(expectedEnd) {
++		t.Fatalf("%v != %v", expectedEnd, info.SuggestedWindow.End)
++	}
++}
++
+ func TestNonce_add(t *testing.T) {
+ 	var c Client
+ 	c.addNonce(http.Header{"Replay-Nonce": {"nonce"}})
+diff --git a/acme/rfc8555.go b/acme/rfc8555.go
+index 3152e53..3eaf935 100644
+--- a/acme/rfc8555.go
++++ b/acme/rfc8555.go
+@@ -7,6 +7,7 @@ package acme
+ import (
+ 	"context"
+ 	"crypto"
++	"crypto/x509"
+ 	"encoding/base64"
+ 	"encoding/json"
+ 	"encoding/pem"
+@@ -205,6 +206,7 @@ func (c *Client) AuthorizeOrder(ctx context.Context, id []AuthzID, opt ...OrderO
+ 		Identifiers []wireAuthzID `json:"identifiers"`
+ 		NotBefore   string        `json:"notBefore,omitempty"`
+ 		NotAfter    string        `json:"notAfter,omitempty"`
++		Replaces    string        `json:"replaces,omitempty"`
+ 	}{}
+ 	for _, v := range id {
+ 		req.Identifiers = append(req.Identifiers, wireAuthzID{
+@@ -218,6 +220,14 @@ func (c *Client) AuthorizeOrder(ctx context.Context, id []AuthzID, opt ...OrderO
+ 			req.NotBefore = time.Time(o).Format(time.RFC3339)
+ 		case orderNotAfterOpt:
+ 			req.NotAfter = time.Time(o).Format(time.RFC3339)
++		case orderReplacesCert:
++			req.Replaces = certRenewalIdentifier(o.cert)
++		case orderReplacesCertDER:
++			cert, err := x509.ParseCertificate(o)
++			if err != nil {
++				return nil, fmt.Errorf("failed to parse certificate being replaced: %w", err)
++			}
++			req.Replaces = certRenewalIdentifier(cert)
+ 		default:
+ 			// Package's fault if we let this happen.
+ 			panic(fmt.Sprintf("unsupported order option type %T", o))
+diff --git a/acme/rfc8555_test.go b/acme/rfc8555_test.go
+index d65720a..ec51a7a 100644
+--- a/acme/rfc8555_test.go
++++ b/acme/rfc8555_test.go
+@@ -766,10 +766,17 @@ func TestRFC_AuthorizeOrder(t *testing.T) {
+ 	s.start()
+ 	defer s.close()
+ 
++	prevCertDER, _ := pem.Decode([]byte(leafPEM))
++	prevCert, err := x509.ParseCertificate(prevCertDER.Bytes)
++	if err != nil {
++		t.Fatal(err)
++	}
++
+ 	cl := &Client{Key: testKeyEC, DirectoryURL: s.url("/")}
+ 	o, err := cl.AuthorizeOrder(context.Background(), DomainIDs("example.org"),
+ 		WithOrderNotBefore(time.Date(2019, 8, 31, 0, 0, 0, 0, time.UTC)),
+ 		WithOrderNotAfter(time.Date(2019, 9, 2, 0, 0, 0, 0, time.UTC)),
++		WithOrderReplacesCert(prevCert),
+ 	)
+ 	if err != nil {
+ 		t.Fatal(err)
+diff --git a/acme/types.go b/acme/types.go
+index 640223c..aed6a6d 100644
+--- a/acme/types.go
++++ b/acme/types.go
+@@ -293,6 +293,10 @@ type Directory struct {
+ 	// KeyChangeURL allows to perform account key rollover flow.
+ 	KeyChangeURL string
+ 
++	// RenewalInfoURL allows to perform certificate renewal using the ACME
++	// Renewal Information (ARI) Extension.
++	RenewalInfoURL string
++
+ 	// Terms is a URI identifying the current terms of service.
+ 	Terms string
+ 
+@@ -391,6 +395,30 @@ type orderNotAfterOpt time.Time
+ 
+ func (orderNotAfterOpt) privateOrderOpt() {}
+ 
++// WithOrderReplacesCert indicates that this Order is for a replacement of an
++// existing certificate.
++// See https://datatracker.ietf.org/doc/html/draft-ietf-acme-ari-03#section-5
++func WithOrderReplacesCert(cert *x509.Certificate) OrderOption {
++	return orderReplacesCert{cert}
++}
++
++type orderReplacesCert struct {
++	cert *x509.Certificate
++}
++
++func (orderReplacesCert) privateOrderOpt() {}
++
++// WithOrderReplacesCertDER indicates that this Order is for a replacement of
++// an existing DER-encoded certificate.
++// See https://datatracker.ietf.org/doc/html/draft-ietf-acme-ari-03#section-5
++func WithOrderReplacesCertDER(der []byte) OrderOption {
++	return orderReplacesCertDER(der)
++}
++
++type orderReplacesCertDER []byte
++
++func (orderReplacesCertDER) privateOrderOpt() {}
++
+ // Authorization encodes an authorization response.
+ type Authorization struct {
+ 	// URI uniquely identifies a authorization.
+@@ -627,3 +655,17 @@ func WithTemplate(t *x509.Certificate) CertOption {
+ type certOptTemplate x509.Certificate
+ 
+ func (*certOptTemplate) privateCertOpt() {}
++
++// RenewalInfoWindow describes the time frame during which the ACME client
++// should attempt to renew, using the ACME Renewal Info Extension.
++type RenewalInfoWindow struct {
++	Start time.Time `json:"start"`
++	End   time.Time `json:"end"`
++}
++
++// RenewalInfo describes the suggested renewal window for a given certificate,
++// returned from an ACME server, using the ACME Renewal Info Extension.
++type RenewalInfo struct {
++	SuggestedWindow RenewalInfoWindow `json:"suggestedWindow"`
++	ExplanationURL  string            `json:"explanationURL"`
++}

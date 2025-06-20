@@ -293,6 +293,10 @@ type Directory struct {
 	// KeyChangeURL allows to perform account key rollover flow.
 	KeyChangeURL string
 
+	// RenewalInfoURL allows to perform certificate renewal using the ACME
+	// Renewal Information (ARI) Extension.
+	RenewalInfoURL string
+
 	// Terms is a URI identifying the current terms of service.
 	Terms string
 
@@ -390,6 +394,30 @@ func (orderNotBeforeOpt) privateOrderOpt() {}
 type orderNotAfterOpt time.Time
 
 func (orderNotAfterOpt) privateOrderOpt() {}
+
+// WithOrderReplacesCert indicates that this Order is for a replacement of an
+// existing certificate.
+// See https://datatracker.ietf.org/doc/html/draft-ietf-acme-ari-03#section-5
+func WithOrderReplacesCert(cert *x509.Certificate) OrderOption {
+	return orderReplacesCert{cert}
+}
+
+type orderReplacesCert struct {
+	cert *x509.Certificate
+}
+
+func (orderReplacesCert) privateOrderOpt() {}
+
+// WithOrderReplacesCertDER indicates that this Order is for a replacement of
+// an existing DER-encoded certificate.
+// See https://datatracker.ietf.org/doc/html/draft-ietf-acme-ari-03#section-5
+func WithOrderReplacesCertDER(der []byte) OrderOption {
+	return orderReplacesCertDER(der)
+}
+
+type orderReplacesCertDER []byte
+
+func (orderReplacesCertDER) privateOrderOpt() {}
 
 // Authorization encodes an authorization response.
 type Authorization struct {
@@ -627,3 +655,17 @@ func WithTemplate(t *x509.Certificate) CertOption {
 type certOptTemplate x509.Certificate
 
 func (*certOptTemplate) privateCertOpt() {}
+
+// RenewalInfoWindow describes the time frame during which the ACME client
+// should attempt to renew, using the ACME Renewal Info Extension.
+type RenewalInfoWindow struct {
+	Start time.Time `json:"start"`
+	End   time.Time `json:"end"`
+}
+
+// RenewalInfo describes the suggested renewal window for a given certificate,
+// returned from an ACME server, using the ACME Renewal Info Extension.
+type RenewalInfo struct {
+	SuggestedWindow RenewalInfoWindow `json:"suggestedWindow"`
+	ExplanationURL  string            `json:"explanationURL"`
+}
