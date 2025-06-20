@@ -1,0 +1,30 @@
+diff --git a/acme/acme.go b/acme/acme.go
+index c5808e8..8e04fbf 100644
+--- a/acme/acme.go
++++ b/acme/acme.go
+@@ -280,6 +280,13 @@ func (c *Client) FetchRenewalInfo(ctx context.Context, leaf []byte) (*RenewalInf
+ 	if err := json.NewDecoder(res.Body).Decode(&info); err != nil {
+ 		return nil, fmt.Errorf("parsing renewal info response: %w", err)
+ 	}
++
++	updateAt := retryAfter(res.Header.Get("Retry-After"))
++	if updateAt == 0 {
++		return nil, errors.New("parsing renewal info response: Retry-After is invalid")
++	}
++	info.WindowUpdateAt = time.Now().Add(updateAt)
++
+ 	return &info, nil
+ }
+ 
+diff --git a/acme/types.go b/acme/types.go
+index aed6a6d..714e931 100644
+--- a/acme/types.go
++++ b/acme/types.go
+@@ -668,4 +668,7 @@ type RenewalInfoWindow struct {
+ type RenewalInfo struct {
+ 	SuggestedWindow RenewalInfoWindow `json:"suggestedWindow"`
+ 	ExplanationURL  string            `json:"explanationURL"`
++	// WindowUpdateAt is the time when the reneal info should be checked again
++	// https://www.ietf.org/archive/id/draft-ietf-acme-ari-08.html#section-4.3
++	WindowUpdateAt time.Time `json:"-"`
+ }

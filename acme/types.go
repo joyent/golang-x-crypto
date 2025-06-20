@@ -668,4 +668,7 @@ type RenewalInfoWindow struct {
 type RenewalInfo struct {
 	SuggestedWindow RenewalInfoWindow `json:"suggestedWindow"`
 	ExplanationURL  string            `json:"explanationURL"`
+	// WindowUpdateAt is the time when the reneal info should be checked again
+	// https://www.ietf.org/archive/id/draft-ietf-acme-ari-08.html#section-4.3
+	WindowUpdateAt time.Time `json:"-"`
 }

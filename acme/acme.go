@@ -280,6 +280,13 @@ func (c *Client) FetchRenewalInfo(ctx context.Context, leaf []byte) (*RenewalInf
 	if err := json.NewDecoder(res.Body).Decode(&info); err != nil {
 		return nil, fmt.Errorf("parsing renewal info response: %w", err)
 	}
+
+	updateAt := retryAfter(res.Header.Get("Retry-After"))
+	if updateAt == 0 {
+		return nil, errors.New("parsing renewal info response: Retry-After is invalid")
+	}
+	info.WindowUpdateAt = time.Now().Add(updateAt)
+
 	return &info, nil
 }
 
